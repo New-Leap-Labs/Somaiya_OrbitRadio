@@ -1,0 +1,18 @@
+# STM32CubeIDE
+Debug/
+Release/
+.build/
+.settings/
+.cproject
+.project
+
+# Build outputs
+*.o
+*.elf
+*.map
+*.bin
+
+# Logs & temp
+*.log
+*.tmp
+Thumbs.db
