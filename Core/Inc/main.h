@@ -63,6 +63,8 @@ void Error_Handler(void);
 #define RS485_RE_GPIO_Port GPIOC
 #define RS485_DE_Pin GPIO_PIN_2
 #define RS485_DE_GPIO_Port GPIOC
+#define LSB_Pin GPIO_PIN_0
+#define LSB_GPIO_Port GPIOA
 #define BIT_1_Pin GPIO_PIN_1
 #define BIT_1_GPIO_Port GPIOA
 #define BIT_2_Pin GPIO_PIN_4
@@ -77,8 +79,6 @@ void Error_Handler(void);
 #define TMS_GPIO_Port GPIOA
 #define TCK_Pin GPIO_PIN_14
 #define TCK_GPIO_Port GPIOA
-#define LSB_Pin GPIO_PIN_15
-#define LSB_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
 
