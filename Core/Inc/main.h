@@ -1,10 +1,24 @@
-/* ============================================================================
- *  BeliefSat APRS Modem - main.h
- *  STM32F446RE
- *  RS-485 + AFSK1200 + AX.25 + DRA818U (435.2480 MHz)
- * ============================================================================
- */
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.h
+  * @brief          : Header for main.c file.
+  *                   This file contains the common defines of the application.
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2024 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
 
+/* Define to prevent recursive inclusion -------------------------------------*/
 #ifndef __MAIN_H
 #define __MAIN_H
 
@@ -12,83 +26,63 @@
 extern "C" {
 #endif
 
+/* Includes ------------------------------------------------------------------*/
 #include "stm32f4xx_hal.h"
 
-/* ===================== RS-485 (ADM2582E) ===================== */
-/* RE = PC0  (LOW  = Receive)
- * DE = PC2  (LOW  = Receive / HIGH = Transmit)
- */
-//#define RS485_RE_Pin          GPIO_PIN_0
-//#define RS485_RE_GPIO_Port    GPIOC
-//
-//#define RS485_DE_Pin          GPIO_PIN_2
-//#define RS485_DE_GPIO_Port    GPIOC
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
 
-/* ===================== 4-bit DAC (AFSK Output) ===================== */
-/* LSB = PA15   (bit0)
- * BIT_1 = PA1  (bit1)
- * BIT_2 = PA4  (bit2)
- * MSB = PA6    (bit3)
- */
-#define LSB_Pin               GPIO_PIN_15
-#define LSB_GPIO_Port         GPIOA
+/* USER CODE END Includes */
 
-#define BIT_1_Pin             GPIO_PIN_1
-#define BIT_1_GPIO_Port       GPIOA
+/* Exported types ------------------------------------------------------------*/
+/* USER CODE BEGIN ET */
 
-#define BIT_2_Pin             GPIO_PIN_4
-#define BIT_2_GPIO_Port       GPIOA
+/* USER CODE END ET */
 
-#define MSB_Pin               GPIO_PIN_6
-#define MSB_GPIO_Port         GPIOA
+/* Exported constants --------------------------------------------------------*/
+/* USER CODE BEGIN EC */
 
-/* ===================== PTT (DRA818U) ===================== */
-/* PC9 = PTT_OUT → (NOT Gate) → DRA818 PTT
- * MCU HIGH = TX enabled
- */
-#define PTT_UHF_Pin           GPIO_PIN_9
-#define PTT_UHF_GPIO_Port     GPIOC
+/* USER CODE END EC */
 
-/* ===================== Debug LED ===================== */
-#define LD2_Pin               GPIO_PIN_5
-#define LD2_GPIO_Port         GPIOA
+/* Exported macro ------------------------------------------------------------*/
+/* USER CODE BEGIN EM */
 
-/* ===================== USART2 (Debug UART) ===================== */
-/* PA2 = TX, PA3 = RX */
-#define USART_TX_Pin          GPIO_PIN_2
-#define USART_TX_GPIO_Port    GPIOA
+/* USER CODE END EM */
 
-#define USART_RX_Pin          GPIO_PIN_3
-#define USART_RX_GPIO_Port    GPIOA
-
-/* ===================== USART1 (RS-485 HALF-DUPLEX RX) ===================== */
-/* PA9 = USART1 TX (used as half-duplex RX/TX) */
-//#define USART1_RXTX_Pin       GPIO_PIN_9
-//#define USART1_RXTX_GPIO_Port GPIOA
-
-/* USART1 Full-Duplex Pins */
-#define USART1_TX_Pin        GPIO_PIN_9
-#define USART1_TX_GPIO_Port  GPIOA
-#define USART1_RX_Pin        GPIO_PIN_10
-#define USART1_RX_GPIO_Port  GPIOA
-
-/* ===================== USART6 (DRA818U) ===================== */
-/* PC6 = TX, PC7 = RX */
-#define USART6_TX_Pin         GPIO_PIN_6
-#define USART6_TX_GPIO_Port   GPIOC
-
-#define USART6_RX_Pin         GPIO_PIN_7
-#define USART6_RX_GPIO_Port   GPIOC
-
-/* ===================== Other Pins ===================== */
-#define SWO_Pin               GPIO_PIN_3
-#define SWO_GPIO_Port         GPIOB
-
-/* ===================== Buffer Size ===================== */
-#define LINE_BUF_SIZE         256
-
-/* ===================== Prototypes ===================== */
+/* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
+
+/* USER CODE BEGIN EFP */
+
+/* USER CODE END EFP */
+
+/* Private defines -----------------------------------------------------------*/
+#define B1_Pin GPIO_PIN_13
+#define B1_GPIO_Port GPIOC
+#define RS485_RE_Pin GPIO_PIN_0
+#define RS485_RE_GPIO_Port GPIOC
+#define RS485_DE_Pin GPIO_PIN_2
+#define RS485_DE_GPIO_Port GPIOC
+#define BIT_1_Pin GPIO_PIN_1
+#define BIT_1_GPIO_Port GPIOA
+#define BIT_2_Pin GPIO_PIN_4
+#define BIT_2_GPIO_Port GPIOA
+#define LD2_Pin GPIO_PIN_5
+#define LD2_GPIO_Port GPIOA
+#define MSB_Pin GPIO_PIN_6
+#define MSB_GPIO_Port GPIOA
+#define PTT_UHF_Pin GPIO_PIN_9
+#define PTT_UHF_GPIO_Port GPIOC
+#define TMS_Pin GPIO_PIN_13
+#define TMS_GPIO_Port GPIOA
+#define TCK_Pin GPIO_PIN_14
+#define TCK_GPIO_Port GPIOA
+#define LSB_Pin GPIO_PIN_15
+#define LSB_GPIO_Port GPIOA
+
+/* USER CODE BEGIN Private defines */
+
+/* USER CODE END Private defines */
 
 #ifdef __cplusplus
 }

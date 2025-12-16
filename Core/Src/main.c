@@ -1,133 +1,233 @@
-/* main.c
- * UART (Binary Protocol) -> APRS (AX.25) -> AFSK1200 -> DRA818U
- * VERSION 4 - Binary Protocol with Sync Header
- * FIXED: Properly handles OrbitAid_Command structure
- */
-
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body - APRS/AFSK Audio Tone Generator
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2025 STMicroelectronics.
+  * All rights reserved.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
 #include "main.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
 #include "afsk.h"
 #include "ax25.h"
-
 #include <string.h>
-#include <stdio.h>
 #include <stdint.h>
 
-/* Hardware handles */
-UART_HandleTypeDef huart1; /* UART1 async (USART1) PA9/PA10 */
-UART_HandleTypeDef huart2; /* Debug (USART2) PA2/PA3 */
-UART_HandleTypeDef huart6; /* DRA818U (USART6) PC6/PC7 */
-TIM_HandleTypeDef  htim3;  /* sample timer */
+/* USER CODE END Includes */
 
-/* APRS config */
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+#define CMD_TYPE_FREQ_CHANGE  0x01
+#define CMD_TYPE_TELEMETRY    0x02
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+#define PKT_MAX_PAYLOAD     256
+#define PKT_HEADER_SIZE     4
+#define PKT_TOTAL_SIZE      260
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim3;
+
+UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart6;
+
+IWDG_HandleTypeDef hiwdg;
+
+/* USER CODE BEGIN PV */
 static const char SRC_CALL[]  = "VU3CDI";
 static const uint8_t SRC_SSID = 5;
 static const char DST_CALL[]  = "VU2CWN";
 static const uint8_t DST_SSID = 0;
-static const char PATH1_CALL[] = "WIDE1";
+static const char PATH1_CALL[] = "WIDE";
 static const uint8_t PATH1_SSID = 1;
-static const char PATH2_CALL[] = "WIDE2";
-static const uint8_t PATH2_SSID = 1;
+static const char PATH2_CALL[] = "WIDE";
+static const uint8_t PATH2_SSID = 2;
 
 /* Frequency control */
 #define FREQ_DEFAULT "435.2480"
 #define FREQ_BACKUP  "435.2500"
-static volatile uint8_t use_backup_freq = 0;  /* 0 = default, 1 = backup */
+static volatile uint8_t use_backup_freq = 0;
 
-/* Command definitions */
-#define CMD_TYPE_FREQ_CHANGE  0x01
-#define CMD_TYPE_TELEMETRY    0x02
-
-typedef struct OrbitAid_Command_t
-{
+/* Packet structure */
+typedef struct __attribute__((packed)) {
     uint8_t command_type;
-    uint8_t command_payload_length;
+    uint8_t payload_length;
     uint8_t padding[2];
-    uint8_t command_payload[256];
-} OrbitAid_Command;
+    uint8_t payload[PKT_MAX_PAYLOAD];
+} DataPacket_t;
 
-/* Binary protocol reception state machine */
-typedef enum {
-    WAIT_SYNC1,      /* Waiting for 0xAA */
-    WAIT_SYNC2,      /* Waiting for 0x55 */
-    READ_HEADER,     /* Reading 4-byte header */
-    READ_PAYLOAD     /* Reading payload */
-} RxState_t;
+/* Reception buffer - receives complete packet structure */
+static DataPacket_t rxData;
+static DataPacket_t processData;
+static volatile uint8_t packet_ready = 0;
 
-static volatile RxState_t rx_state = WAIT_SYNC1;
-static volatile OrbitAid_Command rx_command;
-static volatile uint16_t rx_header_index = 0;
-static volatile uint16_t rx_payload_index = 0;
-static volatile uint8_t command_ready = 0;  /* Flag: complete command received */
+/* Statistics */
+static uint32_t packets_valid = 0;
+static uint32_t packets_rejected = 0;
+static uint32_t uart_errors = 0;
 
-/* buffers */
-#define AX25_BUF_SIZE 4096
+/* Buffers - Reduced size for memory optimization */
+#define AX25_BUF_SIZE 512  // Reduced from 4096
 static uint8_t ax25_buffer[AX25_BUF_SIZE];
 static uint16_t ax25_len = 0;
 
-/* Async UART reception buffer */
-static uint8_t uart_rx_byte;
-
-/* DAC pin masks - precomputed for fast atomic writes */
+/* DAC pin masks for 4-bit R-2R ladder DAC */
 static uint32_t dac_set_masks[16];
 static uint32_t dac_reset_masks[16];
 
-/* forward declarations */
-void SystemClock_Config(void);
-void GPIO_Init(void);
-void USART2_Init(void);
-void USART1_Init(void);
-void USART6_Init(void);
-void TIM3_Init(void);
-void DAC_PrecomputeMasks(void);
+/* USER CODE END PV */
 
-static void Debug_Print(const char *s);
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_USART6_UART_Init(void);
+static void MX_TIM3_Init(void);
+static void MX_IWDG_Init(void);
+/* USER CODE BEGIN PFP */
 static void DRA_Send(const char *s);
 static void DRA_Init(void);
-void Debug_PrintClocks(void);
-static void ProcessCommand(OrbitAid_Command *cmd);
+static void ProcessCommand(DataPacket_t *pkt);
 static void TransmitTelemetry(const char *payload_text);
-
-/* External function to check if AFSK is still transmitting */
+static inline int IsValidPacket(DataPacket_t *packet);
 extern uint8_t afsk_isBusy(void);
-extern uint32_t afsk_getBitsRemaining(void);
+/* USER CODE END PFP */
 
-/* Optimized DAC write function using precomputed BSRR masks */
-void DAC_Write4(uint8_t v)
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+/**
+ * @brief APRS/AFSK Audio Tone Generation Overview
+ *
+ * This code implements Bell 202 AFSK (Audio Frequency Shift Keying) for APRS:
+ * - Mark (1):  1200 Hz
+ * - Space (0): 2200 Hz
+ * - Baud rate: 1200 baud
+ *
+ * Signal Flow:
+ * 1. AX.25 frame encoding (ax25_encode) - Creates proper APRS packet
+ * 2. AFSK generation (afsk_generate) - Converts bits to audio samples
+ * 3. Timer interrupt (afsk_timer_tick) - Outputs samples at 9600 Hz via DAC
+ * 4. DAC output (DAC_Write4) - 4-bit R-2R ladder creates analog audio
+ * 5. Audio feeds DRA818U microphone input
+ *
+ * Timer3 Configuration for 9600 Hz:
+ * - System clock: 84 MHz (APB1)
+ * - Prescaler: 83 (84MHz / 84 = 1 MHz)
+ * - Period: 103 (1MHz / 104 ≈ 9615 Hz ≈ 9600 Hz)
+ *
+ * At 9600 Hz sample rate:
+ * - 1200 Hz tone = 8 samples per cycle (9600/1200)
+ * - 2200 Hz tone = 4.36 samples per cycle (9600/2200)
+ */
+
+/* Check if payload contains printable ASCII */
+static uint8_t IsValidPayload(const uint8_t *payload, uint8_t len)
 {
-#if 1
-    /* FAST VERSION: Atomic write using BSRR (requires all pins on same port) */
-    GPIOA->BSRR = dac_set_masks[v & 0x0F] | dac_reset_masks[v & 0x0F];
-#else
-    /* SLOW VERSION: Individual GPIO writes (use if pins on different ports) */
-    HAL_GPIO_WritePin(LSB_GPIO_Port, LSB_Pin,   (v>>0) & 1 ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(BIT_1_GPIO_Port, BIT_1_Pin, (v>>1) & 1 ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(BIT_2_GPIO_Port, BIT_2_Pin, (v>>2) & 1 ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(MSB_GPIO_Port, MSB_Pin,   (v>>3) & 1 ? GPIO_PIN_SET : GPIO_PIN_RESET);
-#endif
+    if (len == 0 || len > 256) return 0;
+
+    for (uint8_t i = 0; i < len; i++) {
+        if ((payload[i] >= 32 && payload[i] <= 126) ||
+            payload[i] == '\r' || payload[i] == '\n' || payload[i] == '\t') {
+            continue;
+        }
+        return 0;
+    }
+    return 1;
 }
 
-/* Precompute BSRR masks for all 16 possible DAC values */
+/* Validation function - CHECK COMMAND TYPE FIRST */
+static inline int IsValidPacket(DataPacket_t *packet)
+{
+    if (packet->command_type < CMD_TYPE_FREQ_CHANGE ||
+        packet->command_type > CMD_TYPE_TELEMETRY) {
+        return 0;
+    }
+
+    if (packet->payload_length == 0 || packet->payload_length > 256) {
+        return 0;
+    }
+
+    if (!IsValidPayload(packet->payload, packet->payload_length)) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/**
+ * @brief Write 4-bit value to R-2R DAC
+ * @param v: 4-bit value (0-15)
+ *
+ * DAC Pin Assignment:
+ * - LSB (bit 0): PA4
+ * - BIT_1 (bit 1): PA6
+ * - BIT_2 (bit 2): PA7
+ * - MSB (bit 3): PA0
+ *
+ * Uses precomputed masks for fast GPIO writes via BSRR register
+ */
+void DAC_Write4(uint8_t v)
+{
+    GPIOA->BSRR = dac_set_masks[v & 0x0F] | dac_reset_masks[v & 0x0F];
+}
+
+/**
+ * @brief Precompute GPIO masks for all 16 DAC values
+ *
+ * BSRR register layout:
+ * - Lower 16 bits: Set pins (write 1)
+ * - Upper 16 bits: Reset pins (write 1)
+ *
+ * This optimization allows single-cycle GPIO writes
+ */
 void DAC_PrecomputeMasks(void)
 {
     for (uint8_t v = 0; v < 16; v++) {
         uint32_t set_mask = 0;
         uint32_t reset_mask = 0;
-
-        /* LSB (bit 0) - PA15 */
         if (v & 0x01) set_mask |= LSB_Pin; else reset_mask |= (LSB_Pin << 16);
-        /* BIT_1 (bit 1) - PA1 */
         if (v & 0x02) set_mask |= BIT_1_Pin; else reset_mask |= (BIT_1_Pin << 16);
-        /* BIT_2 (bit 2) - PA4 */
         if (v & 0x04) set_mask |= BIT_2_Pin; else reset_mask |= (BIT_2_Pin << 16);
-        /* MSB (bit 3) - PA6 */
         if (v & 0x08) set_mask |= MSB_Pin; else reset_mask |= (MSB_Pin << 16);
-
         dac_set_masks[v] = set_mask;
         dac_reset_masks[v] = reset_mask;
     }
 }
 
-/* HAL timer callback - calls afsk tick */
+/**
+ * @brief Timer3 interrupt callback - AFSK audio sample output
+ *
+ * Called at 9600 Hz to generate AFSK audio tones:
+ * - afsk_timer_tick() fetches next audio sample
+ * - Sample output via DAC_Write4()
+ * - Creates 1200 Hz (mark) and 2200 Hz (space) tones
+ *
+ * At 9600 Hz sample rate:
+ * - 1200 Hz: 8 samples per cycle
+ * - 2200 Hz: ~4.36 samples per cycle
+ */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM3) {
@@ -135,455 +235,142 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     }
 }
 
-/* UART Receive Complete Callback - Binary Protocol State Machine */
+/* UART Receive Complete Callback - Receives COMPLETE PACKET */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1)
     {
-        /* Toggle LED to show activity */
-        HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-
-        /* State machine for binary protocol with sync header */
-        switch (rx_state)
-        {
-            case WAIT_SYNC1:
-                if (uart_rx_byte == 0xAA) {
-                    rx_state = WAIT_SYNC2;
-                }
-                break;
-
-            case WAIT_SYNC2:
-                if (uart_rx_byte == 0x55) {
-                    /* Sync header complete, read command header */
-                    rx_state = READ_HEADER;
-                    rx_header_index = 0;
-                    rx_payload_index = 0;
-                } else {
-                    /* Not a valid sync sequence, restart */
-                    rx_state = WAIT_SYNC1;
-                }
-                break;
-
-            case READ_HEADER:
-                /* Read 4-byte header: type, length, padding[2] */
-                ((uint8_t*)&rx_command)[rx_header_index++] = uart_rx_byte;
-
-                if (rx_header_index >= 4) {
-                    /* Header complete, check if there's payload */
-                    if (rx_command.command_payload_length > 0) {
-                        if (rx_command.command_payload_length > 256) {
-                            /* Invalid length, reset */
-                            rx_state = WAIT_SYNC1;
-                        } else {
-                            /* Read payload */
-                            rx_state = READ_PAYLOAD;
-                            rx_payload_index = 0;
-                        }
-                    } else {
-                        /* No payload (e.g., FREQ_CHANGE command) */
-                        command_ready = 1;
-                        rx_state = WAIT_SYNC1;
-                    }
-                }
-                break;
-
-            case READ_PAYLOAD:
-                /* Read payload bytes */
-                rx_command.command_payload[rx_payload_index++] = uart_rx_byte;
-
-                if (rx_payload_index >= rx_command.command_payload_length) {
-                    /* Complete command received */
-                    command_ready = 1;
-                    rx_state = WAIT_SYNC1;
-                }
-                break;
-
-            default:
-                rx_state = WAIT_SYNC1;
-                break;
+        if (IsValidPacket(&rxData)) {
+            packets_valid++;
+            memcpy(&processData, &rxData, sizeof(DataPacket_t));
+            packet_ready = 1;
+            HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+        } else {
+            packets_rejected++;
         }
 
-        /* Re-enable async reception for next byte */
-        HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
+        HAL_UART_Receive_IT(&huart1, (uint8_t*)&rxData, sizeof(DataPacket_t));
     }
 }
 
-int main(void)
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    HAL_Init();
-    SystemClock_Config();
-
-    GPIO_Init();
-    DAC_PrecomputeMasks();  /* Precompute DAC masks for fast writes */
-
-    USART2_Init(); /* debug */
-    USART6_Init(); /* DRA */
-    USART1_Init(); /* UART async mode */
-    TIM3_Init();   /* sample timer */
-
-    /* init afsk */
-    afsk_Init();
-
-    Debug_Print("\r\n=== BeliefSat OrbitRadio-5 APRS MODEM v4 ===\r\n");
-    Debug_Print("Binary Protocol with Sync Header (0xAA 0x55)\r\n");
-
-    /* Print clock info for debugging */
-    Debug_PrintClocks();
-
-    DRA_Init();
-
-    /* Start asynchronous UART reception */
-    HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
-
-    Debug_Print("UART listening for binary commands (PA9/PA10)...\r\n");
-
-    /* main loop: check for command flag, process and transmit */
-    for (;;)
+    if (huart->Instance == USART1)
     {
-        /* Check if complete command is ready */
-        if (command_ready == 1)
-        {
-            command_ready = 0;  /* Clear flag immediately */
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        __HAL_UART_CLEAR_NEFLAG(huart);
+        __HAL_UART_CLEAR_FEFLAG(huart);
+        __HAL_UART_CLEAR_PEFLAG(huart);
 
-            /* Make a local copy of the command for processing */
-            OrbitAid_Command cmd_copy;
-            memcpy(&cmd_copy, (void*)&rx_command, sizeof(OrbitAid_Command));
+        uart_errors++;
 
-            /* Process the received command */
-            ProcessCommand(&cmd_copy);
-        }
-
-        /* Main loop can do other tasks here if needed */
-        HAL_Delay(10);  /* Small delay to prevent CPU hogging */
+        HAL_UART_Receive_IT(&huart1, (uint8_t*)&rxData, sizeof(DataPacket_t));
     }
 }
 
-/* Process received command based on type */
-static void ProcessCommand(OrbitAid_Command *cmd)
+/* Command Processing */
+static void ProcessCommand(DataPacket_t *packet_cmd)
 {
-    char dbg[100];
+    HAL_IWDG_Refresh(&hiwdg);
 
-    snprintf(dbg, sizeof(dbg), "\r\n>> Command RX: Type=0x%02X, Length=%u\r\n",
-             cmd->command_type, cmd->command_payload_length);
-    Debug_Print(dbg);
+    if (!IsValidPacket(packet_cmd)) {
+        return;
+    }
 
-    switch (cmd->command_type)
+    if (packet_cmd->payload_length < PKT_MAX_PAYLOAD) {
+        packet_cmd->payload[packet_cmd->payload_length] = '\0';
+    } else {
+        packet_cmd->payload[PKT_MAX_PAYLOAD - 1] = '\0';
+    }
+
+    switch (packet_cmd->command_type)
     {
         case CMD_TYPE_FREQ_CHANGE:
-            Debug_Print(">> FREQ_CHANGE command received\r\n");
-
-            /* Toggle frequency */
-            use_backup_freq = !use_backup_freq;
-
-            /* Reconfigure DRA818U immediately */
-            DRA_Init();
-
-            snprintf(dbg, sizeof(dbg), ">> Frequency changed to: %s MHz\r\n\r\n",
-                     use_backup_freq ? FREQ_BACKUP : FREQ_DEFAULT);
-            Debug_Print(dbg);
+            TransmitTelemetry((char*)packet_cmd->payload);
             break;
 
         case CMD_TYPE_TELEMETRY:
-            Debug_Print(">> TELEMETRY command received\r\n");
-
-            /* Null-terminate payload for safety */
-            cmd->command_payload[cmd->command_payload_length] = '\0';
-
-            snprintf(dbg, sizeof(dbg), ">> Payload: %s\r\n", cmd->command_payload);
-            Debug_Print(dbg);
-
-            /* Transmit via APRS */
-            TransmitTelemetry((char*)cmd->command_payload);
+            TransmitTelemetry((char*)packet_cmd->payload);
             break;
 
         default:
-            snprintf(dbg, sizeof(dbg), ">> Unknown command type: 0x%02X\r\n\r\n",
-                     cmd->command_type);
-            Debug_Print(dbg);
             break;
     }
 }
 
-/* Transmit telemetry data via APRS */
+/**
+ * @brief Transmit APRS packet via AFSK
+ *
+ * APRS Packet Structure:
+ * 1. Flag (0x7E) - Packet delimiter
+ * 2. Destination Address (7 bytes) - VU2CWN-0
+ * 3. Source Address (7 bytes) - VU3CDI-5
+ * 4. Path (14 bytes) - WIDE1-1,WIDE2-1
+ * 5. Control (0x03), PID (0xF0)
+ * 6. Information Field - ">Hello World Somaiya OrbitRadio 73"
+ * 7. FCS (2 bytes) - Frame Check Sequence (CRC)
+ * 8. Flag (0x7E)
+ *
+ * The ax25_encode() function creates this properly formatted AX.25 frame
+ * The afsk_generate() converts it to audio samples at 9600 Hz
+ * Timer3 ISR outputs samples at 9600 Hz via DAC
+ */
 static void TransmitTelemetry(const char *payload_text)
 {
-    char dbg[80];
-    char aprs_payload[256];
+    char temp[128];  // Reduced from 300
+    uint8_t len = 0;
 
-    /* Build APRS payload with Data Type Identifier
-     * '>' = Status message (most appropriate for telemetry)
-     */
-    snprintf(aprs_payload, sizeof(aprs_payload), ">%s | Somaiya OrbitRadio-5 73", payload_text);
+    // Manual string concatenation to save stack
+    temp[len++] = '>';
+    while (*payload_text && len < 100) {
+        temp[len++] = *payload_text++;
+    }
+    const char *suffix = " | SVV-KJSIT, NEW LEAP LABS, Somaiya OrbitRadio 73";
+    while (*suffix && len < 127) {
+        temp[len++] = *suffix++;
+    }
+    temp[len] = '\0';
 
-    /* prepare AX.25 frame */
+    HAL_IWDG_Refresh(&hiwdg);
+
+    memset(ax25_buffer, 0, AX25_BUF_SIZE);
     ax25_len = 0;
+
     ax25_encode(ax25_buffer, &ax25_len,
                 SRC_CALL, SRC_SSID,
                 DST_CALL, DST_SSID,
                 PATH1_CALL, PATH1_SSID,
                 PATH2_CALL, PATH2_SSID,
-                aprs_payload);
+                temp);
 
-    snprintf(dbg, sizeof(dbg), "AX.25 frame: %u bytes (payload: %zu chars)\r\n",
-             ax25_len, strlen(aprs_payload));
-    Debug_Print(dbg);
+    if (ax25_len == 0) {
+        return;
+    }
 
-    /* Pre-TX delay - system stabilization */
     HAL_Delay(200);
+    HAL_IWDG_Refresh(&hiwdg);
 
-    /* Enable PTT */
-    HAL_GPIO_WritePin(PTT_UHF_GPIO_Port, PTT_UHF_Pin, GPIO_PIN_SET);
-    Debug_Print("PTT ON\r\n");
-
-    /* TX Delay (TXD) - wait for radio to key up
-     * DRA818U typically needs 300-500ms
-     */
-    HAL_Delay(500);
-
-    /* Generate AFSK bit stream from AX.25 frame */
     afsk_generate(ax25_buffer, ax25_len);
 
-    /* Debug: show bit count */
-    snprintf(dbg, sizeof(dbg), "AFSK bits queued: %lu\r\n", afsk_getBitsRemaining());
-    Debug_Print(dbg);
+    HAL_GPIO_WritePin(PTT_UHF_GPIO_Port, PTT_UHF_Pin, GPIO_PIN_SET);
+    HAL_Delay(1000);
+    HAL_IWDG_Refresh(&hiwdg);
 
-    /* Start transmission */
     afsk_start();
-    Debug_Print("TX started...\r\n");
 
-    /* Wait for transmission to complete */
-    uint32_t start_time = HAL_GetTick();
-    uint32_t timeout = start_time + 15000;  /* 15 second max */
-
-    while (afsk_isBusy()) {
-        if (HAL_GetTick() > timeout) {
-            Debug_Print("TX timeout!\r\n");
-            break;
-        }
+    uint32_t start = HAL_GetTick();
+    while (afsk_isBusy() && (HAL_GetTick() - start) < 20000) {
+        HAL_Delay(10);
+        HAL_IWDG_Refresh(&hiwdg);
     }
 
-    uint32_t tx_time = HAL_GetTick() - start_time;
-    snprintf(dbg, sizeof(dbg), "TX complete: %lu ms\r\n", tx_time);
-    Debug_Print(dbg);
-
-    /* Post-TX delay before releasing PTT */
-    HAL_Delay(100);
-
-    /* Stop AFSK and release PTT */
+    HAL_Delay(200);
     afsk_stop();
+
     HAL_GPIO_WritePin(PTT_UHF_GPIO_Port, PTT_UHF_Pin, GPIO_PIN_RESET);
-    Debug_Print("PTT OFF\r\n\r\n");
+    HAL_Delay(100);
 }
 
-/* System Clock config: use HSI 16 MHz, no PLL */
-void SystemClock_Config(void)
-{
-    RCC_OscInitTypeDef osc = {0};
-    RCC_ClkInitTypeDef clk = {0};
-
-    __HAL_RCC_PWR_CLK_ENABLE();
-    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
-
-    osc.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-    osc.HSIState = RCC_HSI_ON;
-    osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-    osc.PLL.PLLState = RCC_PLL_NONE;
-    HAL_RCC_OscConfig(&osc);
-
-    clk.ClockType = RCC_CLOCKTYPE_SYSCLK|RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-    clk.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
-    clk.AHBCLKDivider = RCC_SYSCLK_DIV1;
-    clk.APB1CLKDivider = RCC_HCLK_DIV1;
-    clk.APB2CLKDivider = RCC_HCLK_DIV1;
-
-    HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_0);
-}
-
-void Debug_PrintClocks(void)
-{
-    char buf[100];
-    uint32_t sysclk = HAL_RCC_GetSysClockFreq();
-    uint32_t hclk = HAL_RCC_GetHCLKFreq();
-    uint32_t pclk1 = HAL_RCC_GetPCLK1Freq();
-
-    uint32_t tim_clk = pclk1;
-    if ((RCC->CFGR & RCC_CFGR_PPRE1) != RCC_CFGR_PPRE1_DIV1) {
-        tim_clk = pclk1 * 2;
-    }
-
-    snprintf(buf, sizeof(buf), "SYSCLK: %lu Hz\r\n", sysclk);
-    Debug_Print(buf);
-    snprintf(buf, sizeof(buf), "HCLK: %lu Hz\r\n", hclk);
-    Debug_Print(buf);
-    snprintf(buf, sizeof(buf), "PCLK1: %lu Hz, TIM3 clk: %lu Hz\r\n", pclk1, tim_clk);
-    Debug_Print(buf);
-
-    uint32_t period = TIM3->ARR + 1;
-    uint32_t actual_rate = tim_clk / period;
-    snprintf(buf, sizeof(buf), "TIM3 ARR: %lu, Sample rate: %lu Hz\r\n", TIM3->ARR, actual_rate);
-    Debug_Print(buf);
-}
-
-/* GPIO init */
-void GPIO_Init(void)
-{
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    __HAL_RCC_GPIOC_CLK_ENABLE();
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-
-    GPIO_InitTypeDef g = {0};
-
-    /* DAC bits - Configure with HIGH speed for clean waveforms
-     * PA15 = LSB (bit 0)
-     * PA1  = BIT_1 (bit 1)
-     * PA4  = BIT_2 (bit 2)
-     * PA6  = MSB (bit 3)
-     */
-    g.Pin = LSB_Pin | BIT_1_Pin | BIT_2_Pin | MSB_Pin;
-    g.Mode = GPIO_MODE_OUTPUT_PP;
-    g.Pull = GPIO_NOPULL;
-    g.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    HAL_GPIO_Init(GPIOA, &g);
-
-    /* Initialize DAC to mid-level (7 = 0b0111) */
-    HAL_GPIO_WritePin(LSB_GPIO_Port, LSB_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(BIT_1_GPIO_Port, BIT_1_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(BIT_2_GPIO_Port, BIT_2_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(MSB_GPIO_Port, MSB_Pin, GPIO_PIN_RESET);
-
-    /* PTT (PC9) */
-    g.Pin = PTT_UHF_Pin;
-    g.Mode = GPIO_MODE_OUTPUT_PP;
-    g.Pull = GPIO_NOPULL;
-    g.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(PTT_UHF_GPIO_Port, &g);
-    HAL_GPIO_WritePin(PTT_UHF_GPIO_Port, PTT_UHF_Pin, GPIO_PIN_RESET);
-
-    /* LD2 (PA5) */
-    g.Pin = LD2_Pin;
-    g.Mode = GPIO_MODE_OUTPUT_PP;
-    g.Pull = GPIO_NOPULL;
-    g.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(LD2_GPIO_Port, &g);
-    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
-}
-
-/* USART2 debug init (PA2 TX, PA3 RX) */
-void USART2_Init(void)
-{
-    __HAL_RCC_USART2_CLK_ENABLE();
-
-    GPIO_InitTypeDef g = {0};
-    g.Pin = USART_TX_Pin | USART_RX_Pin;
-    g.Mode = GPIO_MODE_AF_PP;
-    g.Pull = GPIO_PULLUP;
-    g.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    g.Alternate = GPIO_AF7_USART2;
-    HAL_GPIO_Init(USART_TX_GPIO_Port, &g);
-
-    huart2.Instance = USART2;
-    huart2.Init.BaudRate = 115200;
-    huart2.Init.WordLength = UART_WORDLENGTH_8B;
-    huart2.Init.StopBits = UART_STOPBITS_1;
-    huart2.Init.Parity = UART_PARITY_NONE;
-    huart2.Init.Mode = UART_MODE_TX_RX;
-    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-    HAL_UART_Init(&huart2);
-}
-
-/* USART1 async mode (PA9 TX, PA10 RX) - INTERRUPT DRIVEN */
-void USART1_Init(void)
-{
-    __HAL_RCC_USART1_CLK_ENABLE();
-
-    GPIO_InitTypeDef g = {0};
-
-    /* Configure PA9 (TX) and PA10 (RX) for USART1 */
-    g.Pin = USART1_TX_Pin | USART1_RX_Pin;
-    g.Mode = GPIO_MODE_AF_PP;
-    g.Pull = GPIO_PULLUP;
-    g.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    g.Alternate = GPIO_AF7_USART1;
-    HAL_GPIO_Init(GPIOA, &g);
-
-    huart1.Instance = USART1;
-    huart1.Init.BaudRate = 115200;
-    huart1.Init.WordLength = UART_WORDLENGTH_8B;
-    huart1.Init.StopBits = UART_STOPBITS_1;
-    huart1.Init.Parity = UART_PARITY_NONE;
-    huart1.Init.Mode = UART_MODE_TX_RX;
-    huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-    huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-    HAL_UART_Init(&huart1);
-
-    /* Enable UART1 interrupt in NVIC */
-    HAL_NVIC_SetPriority(USART1_IRQn, 5, 0);
-    HAL_NVIC_EnableIRQ(USART1_IRQn);
-}
-
-/* USART6 for DRA818U (PC6 TX, PC7 RX) */
-void USART6_Init(void)
-{
-    __HAL_RCC_USART6_CLK_ENABLE();
-
-    GPIO_InitTypeDef g = {0};
-    g.Pin = USART6_TX_Pin | USART6_RX_Pin;
-    g.Mode = GPIO_MODE_AF_PP;
-    g.Pull = GPIO_PULLUP;
-    g.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    g.Alternate = GPIO_AF8_USART6;
-    HAL_GPIO_Init(USART6_TX_GPIO_Port, &g);
-
-    huart6.Instance = USART6;
-    huart6.Init.BaudRate = 9600;
-    huart6.Init.WordLength = UART_WORDLENGTH_8B;
-    huart6.Init.StopBits = UART_STOPBITS_1;
-    huart6.Init.Parity = UART_PARITY_NONE;
-    huart6.Init.Mode = UART_MODE_TX_RX;
-    huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-    huart6.Init.OverSampling = UART_OVERSAMPLING_16;
-    HAL_UART_Init(&huart6);
-}
-
-/* TIM3 init: 9600 Hz sample rate for AFSK1200 */
-void TIM3_Init(void)
-{
-    __HAL_RCC_TIM3_CLK_ENABLE();
-
-    htim3.Instance = TIM3;
-
-    uint32_t pclk1 = HAL_RCC_GetPCLK1Freq();
-    uint32_t tim_clk = pclk1;
-    if ((RCC->CFGR & RCC_CFGR_PPRE1) != RCC_CFGR_PPRE1_DIV1) {
-        tim_clk = pclk1 * 2;
-    }
-
-    /* Calculate period for 9600 Hz */
-    uint32_t period = tim_clk / 9600;
-    if (period < 1) period = 1;
-
-    htim3.Init.Prescaler = 0;
-    htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim3.Init.Period = period - 1;
-    htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
-    HAL_TIM_Base_Init(&htim3);
-
-    __HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_UPDATE);
-
-    HAL_TIM_Base_Start_IT(&htim3);
-    HAL_NVIC_SetPriority(TIM3_IRQn, 0, 0);  /* Highest priority */
-    HAL_NVIC_EnableIRQ(TIM3_IRQn);
-}
-
-/* Debug print */
-static void Debug_Print(const char *s)
-{
-    HAL_UART_Transmit(&huart2, (uint8_t*)s, strlen(s), HAL_MAX_DELAY);
-}
-
-/* DRA818U helpers */
 void DRA_Send(const char *s)
 {
     HAL_UART_Transmit(&huart6, (uint8_t*)s, strlen(s), HAL_MAX_DELAY);
@@ -592,34 +379,408 @@ void DRA_Send(const char *s)
 
 void DRA_Init(void)
 {
-    char cmd_buf[80];
     const char *freq = use_backup_freq ? FREQ_BACKUP : FREQ_DEFAULT;
-
-    Debug_Print("Configuring DRA818U...\r\n");
     HAL_Delay(500);
-
     DRA_Send("AT+DMOCONNECT");
     HAL_Delay(300);
 
-    /* Set frequency based on flag */
-    snprintf(cmd_buf, sizeof(cmd_buf), "AT+DMOSETGROUP=0,%s,%s,0000,0,0000", freq, freq);
-    DRA_Send(cmd_buf);
-    HAL_Delay(300);
+    char cmd[64];  // Reduced from 100
+    uint8_t idx = 0;
+    const char *prefix = "AT+DMOSETGROUP=0,";
+    while (*prefix) cmd[idx++] = *prefix++;
+    const char *f = freq;
+    while (*f) cmd[idx++] = *f++;
+    cmd[idx++] = ',';
+    f = freq;
+    while (*f) cmd[idx++] = *f++;
+    const char *suffix = ",0000,0,0000";
+    while (*suffix) cmd[idx++] = *suffix++;
+    cmd[idx] = '\0';
 
+    DRA_Send(cmd);
+    HAL_Delay(300);
     DRA_Send("AT+DMOSETVOLUME=6");
     HAL_Delay(200);
-
-    /* Print current frequency */
-    snprintf(cmd_buf, sizeof(cmd_buf), "DRA818U @ %s MHz ready (Mode: %s)\r\n",
-             freq, use_backup_freq ? "BACKUP" : "DEFAULT");
-    Debug_Print(cmd_buf);
 }
 
-/* Error handler */
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_USART2_UART_Init();
+  MX_USART1_UART_Init();
+  MX_USART6_UART_Init();
+  MX_TIM3_Init();
+  MX_IWDG_Init();
+  /* USER CODE BEGIN 2 */
+  DAC_PrecomputeMasks();
+  HAL_Delay(100);
+
+  afsk_Init();
+
+  DRA_Init();
+
+  memset(&rxData, 0, sizeof(DataPacket_t));
+  memset(&processData, 0, sizeof(DataPacket_t));
+  packet_ready = 0;
+
+  HAL_UART_Receive_IT(&huart1, (uint8_t*)&rxData, sizeof(DataPacket_t));
+
+  uint32_t last_status = HAL_GetTick();
+
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    HAL_IWDG_Refresh(&hiwdg);
+
+    if (packet_ready)
+    {
+        packet_ready = 0;
+        ProcessCommand(&processData);
+    }
+
+    uint32_t now = HAL_GetTick();
+
+    if ((now - last_status) >= 10000) {
+        last_status = now;
+    }
+
+    HAL_Delay(10);
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 16;
+  RCC_OscInitStruct.PLL.PLLN = 336;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
+  RCC_OscInitStruct.PLL.PLLQ = 2;
+  RCC_OscInitStruct.PLL.PLLR = 2;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
+
+  /* USER CODE BEGIN IWDG_Init 0 */
+
+  /* USER CODE END IWDG_Init 0 */
+
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_64;
+  hiwdg.Init.Reload = 4095;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 83;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 103;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+  HAL_TIM_Base_Start_IT(&htim3);
+  /* USER CODE END TIM3_Init 2 */
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+  HAL_NVIC_SetPriority(USART1_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(USART1_IRQn);
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief USART6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART6_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART6_Init 0 */
+
+  /* USER CODE END USART6_Init 0 */
+
+  /* USER CODE BEGIN USART6_Init 1 */
+
+  /* USER CODE END USART6_Init 1 */
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 9600;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART6_Init 2 */
+
+  /* USER CODE END USART6_Init 2 */
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+
+  /* USER CODE END MX_GPIO_Init_1 */
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, RS485_RE_Pin|RS485_DE_Pin|PTT_UHF_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, BIT_1_Pin|BIT_2_Pin|LD2_Pin|MSB_Pin
+                          |LSB_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : B1_Pin */
+  GPIO_InitStruct.Pin = B1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : RS485_RE_Pin RS485_DE_Pin PTT_UHF_Pin */
+  GPIO_InitStruct.Pin = RS485_RE_Pin|RS485_DE_Pin|PTT_UHF_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : BIT_1_Pin BIT_2_Pin LD2_Pin MSB_Pin LSB_Pin */
+  GPIO_InitStruct.Pin = BIT_1_Pin|BIT_2_Pin|LD2_Pin|MSB_Pin|LSB_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
+}
+
+/* USER CODE BEGIN 4 */
+
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
-    while (1) {
-        HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-        HAL_Delay(200);
-    }
+  /* USER CODE BEGIN Error_Handler_Debug */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
 }
+
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */

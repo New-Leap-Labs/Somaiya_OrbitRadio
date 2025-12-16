@@ -1,6 +1,6 @@
 /* afsk.c
  * AFSK1200 generator: bit-stuffing, NRZI, timer-driven sample output.
- * VERSION 3 - Fixed sine table and phase increments for cleaner audio
+ * VERSION 4 - Updated with 100 preamble flags for better packet detection
  */
 
 #include "afsk.h"
@@ -48,6 +48,9 @@ static volatile uint16_t current_phase_inc = PHASE_INC_MARK;
 
 /* Bit stuffing counter - must be reset before each frame */
 static uint8_t consecutive_ones = 0;
+
+/* Preamble configuration - 100 flags for reliable packet detection */
+#define AFSK_PREAMBLE_FLAGS  100
 
 /* External DAC write function */
 extern void DAC_Write4(uint8_t v);
@@ -164,10 +167,10 @@ void afsk_generate(const uint8_t *frame, uint16_t frame_len)
     /* ===== BUILD THE BIT STREAM ===== */
 
     /* 1. PREAMBLE: Send flag bytes (0x7E) WITHOUT bit stuffing
-     *    30 flags = 240 bits = 200ms at 1200 baud
-     *    Reduced from 50 to prevent excessive preamble
+     *    100 flags = 800 bits = 666ms at 1200 baud
+     *    Extended preamble for better packet detection and receiver sync
      */
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < AFSK_PREAMBLE_FLAGS; i++) {
         send_byte_raw(0x7E);
     }
 
